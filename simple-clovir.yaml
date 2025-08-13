@@ -1,25 +1,20 @@
-- hosts: localhost
-  gather_facts: false
-  vars:
-    now: "{{ lookup('pipe','date -Iseconds') }}"
-  tasks:
-    # 진단용 command/grep 태스크는 제거
-    - name: print success json
-      debug:
-        msg:
-          host: "10.100.64.235"
-          status: "success"
-          directory: "/home/rocky"
-          scan_time: "{{ now }}"
-          summary: { total_files: 5 }
-      changed_when: false
-
-    - name: print failed json
-      debug:
-        msg:
-          host: "10.100.64.236"
-          status: "failed"
-          error: "connection_failed"
-          message: "SSH 연결 실패"
-          scan_time: "{{ now }}"
-      changed_when: false
+- name: print connection_failed json (one-line)
+  debug:
+    msg: "RESULT_JSON {{ {
+      'host': inventory_hostname,
+      'status': 'failed',
+      'error': 'connection_failed',
+      'message': inventory_hostname ~ '에 연결할 수 없습니다. ' ~ ( 'SSH' if os_type == 'linux' else 'WinRM') ~ ' 연결 실패.',
+      'os': os_type | title,
+      'scan_time': ansible_date_time.iso8601,
+      'connection_type': ('SSH' if os_type == 'linux' else 'WinRM'),
+      'port': ('22' if os_type == 'linux' else '5985'),
+      'possible_causes': [
+        '잘못된 사용자명 또는 비밀번호',
+        '계정이 잠겨있거나 비활성화됨',
+        ( 'SSH 서비스가 중단되었거나 비밀번호 인증이 비활성화됨' if os_type == 'linux' else 'WinRM 서비스가 중단되었거나 설정되지 않음'),
+        ( '방화벽에서 포트 22가 차단됨' if os_type == 'linux' else '방화벽에서 포트 5985가 차단됨'),
+        '네트워크 연결 문제 또는 호스트가 응답하지 않음'
+      ],
+      'troubleshooting': ( 'SSH 연결: ssh user@host로 수동 테스트, /etc/ssh/sshd_config 확인' if os_type == 'linux' else 'WinRM 연결: winrm quickconfig 실행, Enable-PSRemoting 확인')
+    } | to_json }}"
