@@ -1,0 +1,396 @@
+---
+# =============================================================================
+# 파일 시스템 검사 플레이북 (Linux/Windows 호환)
+# =============================================================================
+#
+# 사용법:
+#
+# 1. Linux 서버 스캔:
+#    ansible-playbook OS.FindFile.yml \
+#      -e 'target_hosts=10.100.64.238' \
+#      -e 'path=/home/user' \
+#      -e 'user=username' \
+#      -e 'password=userpass' \
+#      -e 'os_type=linux'
+#
+# 2. Windows 서버 스캔:
+#    ansible-playbook OS.FindFile.yml \
+#      -e 'target_hosts=10.100.64.120' \
+#      -e 'path=C:\Users\username' \
+#      -e 'user=username' \
+#      -e 'password=userpass' \
+#      -e 'os_type=windows'
+#
+# 3. 여러 서버 동시 스캔:
+#    ansible-playbook OS.FindFile2.yml \
+#      -e 'target_hosts=10.100.64.238,10.100.64.120,192.168.1.100' \
+#      -e 'path=/var/log' \
+#      -e 'user=admin' \
+#      -e 'password=adminpass' \
+#      -e 'os_type=linux'
+#
+# 필수 매개변수:
+#   - target_hosts: 스캔할 서버 IP 주소 (쉼표로 여러 서버 지정 가능)
+#   - path: 스캔할 디렉터리 경로
+#   - user: SSH/WinRM 연결 사용자명
+#   - password: 연결 암호
+#   - os_type: 'linux' 또는 'windows'
+#
+# 사전 요구사항:
+#   - Linux: SSH 서비스 활성화 (포트 22)
+#   - Windows: WinRM 서비스 활성화 및 방화벽 허용 (포트 5985)
+#
+# JSON 출력 구조:
+#
+# 성공시:
+# {
+#   "host": "서버 IP 주소",
+#   "status": "success",
+#   "directory": "스캔한 디렉터리 경로",
+#   "os": "운영체제 (Linux/Windows)",
+#   "scan_time": "스캔 실행 시간 (ISO 8601 형식)",
+#   "summary": {
+#     "total_files": 총파일수,
+#     "total_size": "총파일크기 (사람이 읽기 쉬운 형식)",
+#     "average_size": "평균파일크기"
+#   },
+#   "contents": [
+#     {
+#       "name": "파일명",
+#       "path": "전체경로",
+#       "size": "파일크기 (사람이 읽기 쉬운 형식)",
+#       "size_bytes": 파일크기_바이트,
+#       "permissions": "권한 (Linux: 8진수, Windows: N/A)",
+#       "owner": "소유자",
+#       "group": "그룹 (Linux만, Windows: N/A)",
+#       "modified": "수정시간 (epoch 타임스탬프)",
+#       "accessed": "접근시간 (epoch 타임스탬프)",
+#       "created": "생성시간 (epoch 타임스탬프)",
+#       "is_symlink": 심볼릭링크여부,
+#       "symlink_target": "심볼릭링크 대상 (해당시에만)"
+#     }
+#   ],
+#   "statistics": {
+#     "extensions": {
+#       "확장자": 개수
+#     },
+#     "permissions": {
+#       "권한": 개수 (Linux만)
+#     },
+#     "owners": {
+#       "소유자": 개수
+#     }
+#   }
+# }
+#
+# 실패시:
+# {
+#   "host": "서버 IP 주소",
+#   "status": "failed",
+#   "error": "에러타입",
+#   "message": "에러 메시지",
+#   "directory": "문제가 된 경로",
+#   "os": "운영체제",
+#   "scan_time": "스캔 실행 시간",
+#   "details": "상세 에러 정보 (해당시)"
+# }
+#
+# 에러 타입:
+#   - connection_failed: SSH/WinRM 연결 실패
+#     * 잘못된 사용자명/비밀번호
+#     * 계정 잠김 또는 비활성화
+#     * SSH/WinRM 서비스 중단
+#     * 방화벽 포트 차단 (SSH: 22, WinRM: 5985)
+#     * 비밀번호 인증 비활성화 (Linux)
+#     * 원격 로그인 권한 없음 (Windows)
+#   - path_not_found: 경로를 찾을 수 없음
+#   - not_directory: 지정한 경로가 디렉터리가 아님
+#   - permission_denied: 접근 권한 없음
+#   - directory_not_found: 디렉터리를 찾을 수 없음
+#   - file_listing_failed: 파일 목록 읽기 실패
+#
+# =============================================================================
+
+- name: "설정 - 동적 인벤토리 초기화 및 호스트 그룹 생성"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    user: "{{ user | default('rocky') }}"
+    os_type: "{{ os_type | default('linux') }}"  # linux, windows
+  tasks:
+    - name: "검증 - 필수 입력 변수 검증 (target_hosts, path, user, password, os_type)"
+      assert:
+        that:
+          - target_hosts is defined
+          - path is defined
+          - user is defined
+          - password is defined
+          - os_type in ['linux', 'windows']
+        fail_msg: "필수 변수 target_hosts, path, user, password, os_type(linux/windows) 를 입력하세요."
+
+    - name: "Linux - SSH 연결 설정으로 원격 호스트를 동적 그룹에 추가"
+      when: os_type == 'linux'
+      add_host:
+        name: "{{ item | trim }}"
+        groups: scan_targets
+        ansible_user: "{{ user }}"
+        ansible_password: "{{ password }}"
+        ansible_connection: ssh
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o ConnectTimeout=10"
+        ansible_ssh_retries: 3
+      loop: "{{ target_hosts.split(',') }}"
+
+    - name: "Windows - WinRM 연결 설정으로 원격 호스트를 동적 그룹에 추가"
+      when: os_type == 'windows'
+      add_host:
+        name: "{{ item | trim }}"
+        groups: scan_targets
+        ansible_user: "{{ user }}"
+        ansible_password: "{{ password }}"
+        ansible_connection: winrm
+        ansible_winrm_transport: ntlm
+        ansible_port: 5985
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_operation_timeout_sec: 60
+        ansible_winrm_read_timeout_sec: 90
+      loop: "{{ target_hosts.split(',') }}"
+
+- name: "실행 - 각 호스트별 파일 시스템 스캔 및 정보 수집"
+  hosts: scan_targets
+  gather_facts: true
+  vars: {}
+  tasks:
+    # ----- Connectivity -----
+    - name: "Linux - SSH 연결 상태 확인 (ping 모듈 사용)"
+      when: os_type == 'linux'
+      ping:
+      register: ping_result
+      ignore_errors: true
+
+    - name: "Windows - WinRM 연결 상태 확인 (win_ping 모듈 사용)"
+      when: os_type == 'windows'
+      win_ping:
+      register: ping_result
+      ignore_errors: true
+
+    - name: "에러처리 - SSH/WinRM 연결 실패시 상세 JSON 에러 메시지 출력"
+      debug:
+        msg: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "status": "failed",
+            "error": "connection_failed",
+            "message": "{{ inventory_hostname }}에 연결할 수 없습니다. {{ 'SSH' if os_type == 'linux' else 'WinRM' }} 연결 실패.",
+            "os": "{{ os_type | title }}",
+            "scan_time": "{{ ansible_date_time.iso8601 }}",
+            "connection_type": "{{ 'SSH' if os_type == 'linux' else 'WinRM' }}",
+            "port": "{{ '22' if os_type == 'linux' else '5985' }}",
+            "possible_causes": [
+              "{{ '잘못된 사용자명 또는 비밀번호' }}",
+              "{{ '계정이 잠겨있거나 비활성화됨' }}",
+              "{{ 'SSH 서비스가 중단되었거나 비밀번호 인증이 비활성화됨' if os_type == 'linux' else 'WinRM 서비스가 중단되었거나 설정되지 않음' }}",
+              "{{ '방화벽에서 포트 22가 차단됨' if os_type == 'linux' else '방화벽에서 포트 5985가 차단됨' }}",
+              "{{ '네트워크 연결 문제 또는 호스트가 응답하지 않음' }}"
+            ],
+            "troubleshooting": "{{ 'SSH 연결: ssh user@host로 수동 테스트, /etc/ssh/sshd_config 확인' if os_type == 'linux' else 'WinRM 연결: winrm quickconfig 실행, Enable-PSRemoting 확인' }}"
+          }
+      when: ping_result is failed
+
+    - name: "제어 - 연결 실패시 해당 호스트에서 플레이북 실행 중단"
+      meta: end_host
+      when: ping_result is failed
+
+    # ----- Path checks -----
+    - name: "Linux - 지정된 경로가 존재하는지 확인 (stat 모듈 사용)"
+      when: os_type == 'linux'
+      stat:
+        path: "{{ path }}"
+      register: path_stat
+      ignore_errors: true
+
+    - name: "Windows - 지정된 경로가 존재하는지 확인 (win_stat 모듈 사용)"
+      when: os_type == 'windows'
+      win_stat:
+        path: "{{ path }}"
+      register: path_stat
+      ignore_errors: true
+
+    - name: "에러처리 - 지정된 경로가 존재하지 않을 때 JSON 에러 메시지 출력"
+      debug:
+        msg: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "status": "failed",
+            "error": "path_not_found",
+            "message": "경로를 찾을 수 없습니다: {{ path }} (호스트: {{ inventory_hostname }})",
+            "directory": "{{ path }}",
+            "os": "{{ os_type | title }}",
+            "scan_time": "{{ ansible_date_time.iso8601 }}"
+          }
+      when: path_stat is failed
+
+    - name: "에러처리 - 지정된 경로가 디렉터리가 아닐 때 JSON 에러 메시지 출력"
+      debug:
+        msg: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "status": "failed",
+            "error": "not_directory",
+            "message": "디렉터리가 아닙니다: {{ path }} (호스트: {{ inventory_hostname }})",
+            "directory": "{{ path }}",
+            "os": "{{ os_type | title }}",
+            "scan_time": "{{ ansible_date_time.iso8601 }}"
+          }
+      when: (path_stat.stat is defined) and (path_stat.stat.isdir is defined) and not path_stat.stat.isdir
+
+    - name: "제어 - 경로 관련 에러 발생시 해당 호스트에서 플레이북 실행 중단"
+      meta: end_host
+      when: path_stat is failed or ((path_stat.stat is defined) and (path_stat.stat.isdir is defined) and not path_stat.stat.isdir)
+
+    # ----- List files -----
+    - name: "Linux - 지정된 디렉터리에서 모든 파일 검색 (find 모듈 사용)"
+      when: os_type == 'linux'
+      find:
+        paths: "{{ path }}"
+        recurse: false
+        file_type: file
+        hidden: true
+      register: linux_files
+      ignore_errors: true
+
+    - name: "Windows - 지정된 디렉터리에서 모든 파일 검색 (win_find 모듈 사용)"
+      when: os_type == 'windows'
+      win_find:
+        paths: "{{ path }}"
+        recurse: no
+        file_type: file
+        hidden: yes
+      register: windows_files
+      ignore_errors: true
+
+    - name: "변수설정 - OS 타입에 따라 적절한 파일 검색 결과를 found_files 변수에 할당"
+      set_fact:
+        found_files: "{{ linux_files if os_type == 'linux' else windows_files }}"
+
+    - name: "에러처리 - 파일 목록 읽기 실패시 JSON 에러 메시지 출력"
+      debug:
+        msg: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "status": "failed",
+            "error": "file_listing_failed",
+            "message": "파일 목록을 읽을 수 없습니다: {{ path }} (호스트: {{ inventory_hostname }}). 권한을 확인하세요.",
+            "directory": "{{ path }}",
+            "os": "{{ os_type | title }}",
+            "scan_time": "{{ ansible_date_time.iso8601 }}"
+          }
+      when: found_files is failed
+
+    - name: "에러처리 - 권한 거부 에러 발생시 JSON 에러 메시지 출력 (skipped_paths 확인)"
+      debug:
+        msg: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "status": "failed",
+            "error": "permission_denied",
+            "message": "{{ path }} 디렉터리에 대한 접근 권한이 없습니다. (Permission denied)",
+            "directory": "{{ path }}",
+            "os": "{{ os_type | title }}",
+            "scan_time": "{{ ansible_date_time.iso8601 }}",
+            "details": "{{ found_files.skipped_paths }}"
+          }
+      when: found_files.skipped_paths is defined and found_files.skipped_paths | length > 0 and 'Permission denied' in (found_files.skipped_paths.values() | join(' '))
+
+    - name: "에러처리 - 디렉터리 없음 에러 발생시 JSON 에러 메시지 출력 (skipped_paths 확인)"
+      debug:
+        msg: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "status": "failed",
+            "error": "directory_not_found",
+            "message": "{{ path }} 디렉터리를 찾을 수 없거나 디렉터리가 아닙니다.",
+            "directory": "{{ path }}",
+            "os": "{{ os_type | title }}",
+            "scan_time": "{{ ansible_date_time.iso8601 }}",
+            "details": "{{ found_files.skipped_paths }}"
+          }
+      when: found_files.skipped_paths is defined and found_files.skipped_paths | length > 0 and 'not a directory' in (found_files.skipped_paths.values() | join(' '))
+
+    - name: "제어 - 파일 검색 관련 에러 발생시 해당 호스트에서 플레이북 실행 중단"
+      meta: end_host
+      when: found_files is failed or (found_files.skipped_paths is defined and found_files.skipped_paths | length > 0)
+
+    # ----- Display results -----
+    - name: "출력 - 성공적인 파일 스캔 결과를 구조화된 JSON 형태로 출력"
+      debug:
+        msg: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "status": "success",
+            "directory": "{{ path }}",
+            "os": "{{ os_type | title }}",
+            "scan_time": "{{ ansible_date_time.iso8601 }}",
+            "summary": {
+              "total_files": {{ found_files.files | length if found_files.files is defined else 0 }},
+              "total_size": "{{ (found_files.files | map(attribute='size') | sum) | filesizeformat if found_files.files is defined else '0 B' }}",
+              "average_size": "{{ ((found_files.files | map(attribute='size') | sum) / (found_files.files | length)) | filesizeformat if found_files.files is defined and found_files.files | length > 0 else '0 B' }}"
+            },
+            "contents": [
+              {% if found_files.files is defined %}
+              {% for f in found_files.files | sort(attribute=('lastwritetime' if os_type == 'windows' else 'mtime'), reverse=true) %}
+              {
+                "name": "{{ f.path | basename }}",
+                "path": "{{ f.path }}",
+                "size": "{{ f.size | filesizeformat }}",
+                "size_bytes": {{ f.size }},
+                "permissions": "{{ f.mode if os_type == 'linux' else 'N/A' }}",
+                "owner": "{{ f.pw_name if os_type == 'linux' else (f.owner | default('Unknown')) }}",
+                "group": "{{ f.gr_name if os_type == 'linux' else 'N/A' }}",
+                "modified": "{{ f.lastwritetime if os_type == 'windows' else f.mtime }}",
+                "accessed": "{{ f.lastaccesstime if os_type == 'windows' else f.atime }}",
+                "created": "{{ f.creationtime if os_type == 'windows' else f.ctime }}",
+                "is_symlink": {% if f.islnk %}true{% else %}false{% endif %}{% if f.islnk %},
+                "symlink_target": "{{ f.linkto }}"{% endif %}
+              }{% if not loop.last %},{% endif %}
+              {% endfor %}
+              {% endif %}
+            ],
+            "statistics": {
+              "extensions": {
+                {% if found_files.files is defined %}
+                {% set extensions = {} %}
+                {% for f in found_files.files %}
+                  {% set ext = f.path.split('.')[-1] if '.' in f.path else 'no_extension' %}
+                  {% set _ = extensions.update({ext: (extensions.get(ext, 0) + 1)}) %}
+                {% endfor %}
+                {% for ext, count in extensions.items() | sort %}
+                "{{ ext }}": {{ count }}{% if not loop.last %},{% endif %}
+                {% endfor %}
+                {% endif %}
+              },
+              "permissions": {
+                {% if found_files.files is defined %}
+                {% set permissions = {} %}
+                {% for f in found_files.files if os_type == 'linux' %}
+                  {% set perm = f.mode[-3:] if f.mode else '000' %}
+                  {% set _ = permissions.update({perm: (permissions.get(perm, 0) + 1)}) %}
+                {% endfor %}
+                {% for perm, count in permissions.items() | sort %}
+                "{{ perm }}": {{ count }}{% if not loop.last %},{% endif %}
+                {% endfor %}
+                {% endif %}
+              },
+              "owners": {
+                {% if found_files.files is defined %}
+                {% set owners = {} %}
+                {% for f in found_files.files %}
+                  {% set owner = f.pw_name if os_type == 'linux' else (f.owner | default('Unknown')) %}
+                  {% set _ = owners.update({owner: (owners.get(owner, 0) + 1)}) %}
+                {% endfor %}
+                {% for owner, count in owners.items() | sort %}
+                "{{ owner }}": {{ count }}{% if not loop.last %},{% endif %}
+                {% endfor %}
+                {% endif %}
+              }
+            }
+          }
