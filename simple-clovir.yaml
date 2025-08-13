@@ -1,0 +1,109 @@
+# 리눅스 전용 - 성공/실패 JSON만 출력 (설치 최소)
+# 하드코딩된 대상/계정/경로를 아래 vars에서 수정하세요.
+
+- name: setup dynamic hosts
+  hosts: localhost
+  gather_facts: false
+  vars:
+    targets: ["10.100.64.235"]    # ← 대상 서버 IP들
+    user: "cloviradmin"                  # ← SSH 사용자
+    password: "Goodmit0802!"           # ← SSH 비밀번호 (비번 로그인 허용 필요)
+    path: "/home/cloviradmin"            # ← 확인할 디렉터리
+  tasks:
+    - name: add linux targets
+      add_host:
+        name: "{{ item }}"
+        groups: scan_targets
+        ansible_user: "{{ user }}"
+        ansible_password: "{{ password }}"
+        ansible_connection: ssh
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o ConnectTimeout=6"
+      loop: "{{ targets }}"
+
+- name: check & print json
+  hosts: scan_targets
+  gather_facts: false
+  tasks:
+    # 1) 연결 확인
+    - name: ping
+      ping:
+      register: ping_result
+      ignore_errors: true
+
+    - name: print connection failed json
+      when: ping_result is failed
+      debug:
+        msg: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "status": "failed",
+            "error": "connection_failed",
+            "message": "SSH 연결 실패",
+            "scan_time": "{{ ansible_date_time.iso8601 }}"
+          }
+
+    - meta: end_host
+      when: ping_result is failed
+
+    # 2) 경로 확인
+    - name: stat path
+      stat:
+        path: "{{ path }}"
+      register: st
+      ignore_errors: true
+
+    - name: print not found json
+      when: st is failed or (st.stat.isdir is defined and not st.stat.isdir)
+      debug:
+        msg: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "status": "failed",
+            "error": "{{ 'not_directory' if (st.stat.isdir is defined and not st.stat.isdir) else 'path_not_found' }}",
+            "message": "경로 문제: {{ path }}",
+            "directory": "{{ path }}",
+            "scan_time": "{{ ansible_date_time.iso8601 }}"
+          }
+
+    - meta: end_host
+      when: st is failed or (st.stat.isdir is defined and not st.stat.isdir)
+
+    # 3) 아주 간단한 파일 목록/요약 (모듈 1개만)
+    - name: find files (top-level only)
+      find:
+        paths: "{{ path }}"
+        recurse: false
+        file_type: file
+        hidden: true
+      register: ff
+      ignore_errors: true
+
+    - name: print listing failed json
+      when: ff is failed
+      debug:
+        msg: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "status": "failed",
+            "error": "file_listing_failed",
+            "message": "파일 목록 읽기 실패: {{ path }}",
+            "directory": "{{ path }}",
+            "scan_time": "{{ ansible_date_time.iso8601 }}"
+          }
+
+    - meta: end_host
+      when: ff is failed
+
+    # 4) 성공 JSON (최소 필드만)
+    - name: print success json
+      debug:
+        msg: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "status": "success",
+            "directory": "{{ path }}",
+            "scan_time": "{{ ansible_date_time.iso8601 }}",
+            "summary": {
+              "total_files": {{ ff.files | length if ff.files is defined else 0 }}
+            }
+          }
