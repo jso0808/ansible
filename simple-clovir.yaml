@@ -1,21 +1,18 @@
 - hosts: localhost
   gather_facts: false
+  vars:
+    now: "{{ lookup('pipe','date -Iseconds') }}"
   tasks:
-    - name: show active callback  (환경/설정 확인)
-      command: bash -lc 'ansible-config dump | grep -E "^DEFAULT_STDOUT_CALLBACK|^DEFAULT_NO_TARGET_SYSLOG"'
-      register: cfg
-
-    - debug:
-        var: cfg.stdout_lines
-
+    # 진단용 command/grep 태스크는 제거
     - name: print success json
       debug:
         msg:
           host: "10.100.64.235"
           status: "success"
           directory: "/home/rocky"
-          scan_time: "{{ lookup('pipe','date -Iseconds') }}"
+          scan_time: "{{ now }}"
           summary: { total_files: 5 }
+      changed_when: false
 
     - name: print failed json
       debug:
@@ -24,4 +21,5 @@
           status: "failed"
           error: "connection_failed"
           message: "SSH 연결 실패"
-          scan_time: "{{ lookup('pipe','date -Iseconds') }}"
+          scan_time: "{{ now }}"
+      changed_when: false
