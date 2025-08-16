@@ -1,0 +1,13 @@
+- name: Debug Test
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Print param value
+      ansible.builtin.debug:
+        msg: "Hello Semaphore Runner! :) param --> {{ param }}"
+    - name: Print current date
+      ansible.builtin.command: date
+      register: date_output
+    - name: Show date output
+      ansible.builtin.debug:
+        var: date_output.stdout
